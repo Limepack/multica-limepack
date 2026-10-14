@@ -33,7 +33,7 @@ func newSlackAutopilotFixture(t *testing.T, media engine.MediaResolver) *slackAu
 		t.Skip("local test database not available")
 	}
 	ctx := context.Background()
-	agentID := dbfx.Agent(t, "Slack bug investigator", handlerTestRuntimeID(t))
+	agentID := dbfx.Agent(t, "Slack bug investigator "+uuidToString(dbid.NewV7()), handlerTestRuntimeID(t))
 	apID := dbfx.Insert(t, "autopilot", testutil.Cols{
 		"workspace_id": testWorkspaceID, "title": "Slack bug report", "description": "Reproduce and fix the report.",
 		"assignee_type": "agent", "assignee_id": agentID, "status": "active", "execution_mode": "create_issue",
