@@ -686,6 +686,58 @@ func (q *Queries) ListWebhookDeliveriesByAutopilot(ctx context.Context, arg List
 	return items, nil
 }
 
+const lockWebhookDeliveryForDispatch = `-- name: LockWebhookDeliveryForDispatch :one
+SELECT id, workspace_id, autopilot_id, trigger_id, provider, event, dedupe_key, dedupe_source, signature_status, status, attempt_count, selected_headers, content_type, raw_body, response_status, response_body, autopilot_run_id, replayed_from_delivery_id, error, received_at, last_attempt_at, created_at, available_at, lease_token, lease_expires_at, dispatch_attempts, reason_code, replay_idempotency_key FROM webhook_delivery
+WHERE id = $1 AND workspace_id = $2
+  AND lease_token = $3 AND status = 'queued'
+  AND lease_expires_at > now()
+FOR UPDATE
+`
+
+type LockWebhookDeliveryForDispatchParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	LeaseToken  pgtype.UUID `json:"lease_token"`
+}
+
+// Fence side effects after slow media I/O. An expired worker cannot create
+// an issue; the row lock also keeps a new claimant out until commit.
+func (q *Queries) LockWebhookDeliveryForDispatch(ctx context.Context, arg LockWebhookDeliveryForDispatchParams) (WebhookDelivery, error) {
+	row := q.db.QueryRow(ctx, lockWebhookDeliveryForDispatch, arg.ID, arg.WorkspaceID, arg.LeaseToken)
+	var i WebhookDelivery
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.AutopilotID,
+		&i.TriggerID,
+		&i.Provider,
+		&i.Event,
+		&i.DedupeKey,
+		&i.DedupeSource,
+		&i.SignatureStatus,
+		&i.Status,
+		&i.AttemptCount,
+		&i.SelectedHeaders,
+		&i.ContentType,
+		&i.RawBody,
+		&i.ResponseStatus,
+		&i.ResponseBody,
+		&i.AutopilotRunID,
+		&i.ReplayedFromDeliveryID,
+		&i.Error,
+		&i.ReceivedAt,
+		&i.LastAttemptAt,
+		&i.CreatedAt,
+		&i.AvailableAt,
+		&i.LeaseToken,
+		&i.LeaseExpiresAt,
+		&i.DispatchAttempts,
+		&i.ReasonCode,
+		&i.ReplayIdempotencyKey,
+	)
+	return i, err
+}
+
 const retryClaimedWebhookDelivery = `-- name: RetryClaimedWebhookDelivery :one
 UPDATE webhook_delivery
 SET available_at = $3,

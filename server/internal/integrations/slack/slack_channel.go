@@ -36,6 +36,7 @@ type slackChannel struct {
 	appToken  string        // decrypted xapp- — authorizes the Socket Mode connection
 	botAPI    *slack.Client // bot-token client for outbound Send
 	handler   channel.InboundHandler
+	autopilot AutopilotEventHandler
 	slash     *SlashCommandProcessor // nil disables /issue and /new slash-command handling
 	logger    *slog.Logger
 }
@@ -134,14 +135,13 @@ func (c *slackChannel) handleSocketEvent(ctx context.Context, sm *socketmode.Cli
 		if !ok {
 			return nil
 		}
-		// ACK first: Slack expires un-ACKed envelopes in ~3s, far below the
-		// handler's DB work. The ACK is independent of the handler outcome.
-		if evt.Request != nil {
-			if err := sm.Ack(*evt.Request); err != nil {
-				c.logger.WarnContext(ctx, "slack: ack failed", "error", err)
+		return c.processEventsAPI(ctx, eventsAPI, mentionRe, func() {
+			if evt.Request != nil {
+				if err := sm.Ack(*evt.Request); err != nil {
+					c.logger.WarnContext(ctx, "slack: ack failed", "error", err)
+				}
 			}
-		}
-		return c.dispatchEventsAPI(ctx, eventsAPI, mentionRe)
+		})
 	case socketmode.EventTypeSlashCommand:
 		// ACK first: like Events API envelopes, Slack expires an un-ACKed slash
 		// command in ~3s, well under the DB + Slack HTTP work below. The reply is
@@ -174,6 +174,26 @@ func (c *slackChannel) handleSocketEvent(ctx context.Context, sm *socketmode.Cli
 	return nil
 }
 
+// processEventsAPI persists routed Autopilot reports before acknowledging them.
+// Other events retain the ordinary ACK-first chat path. The Autopilot handler
+// must keep network/media work off this path and return after durable intake.
+func (c *slackChannel) processEventsAPI(ctx context.Context, e slackevents.EventsAPIEvent, mentionRe *regexp.Regexp, ack func()) error {
+	if c.autopilot != nil {
+		if report, ok := autopilotEventFrom(e, c.botUserID); ok {
+			handled, err := c.autopilot.HandleAutopilotEvent(ctx, report)
+			if err != nil {
+				return err
+			}
+			if handled {
+				ack()
+				return nil
+			}
+		}
+	}
+	ack()
+	return c.dispatchEventsAPI(ctx, e, mentionRe)
+}
+
 // dispatchEventsAPI translates one Events API envelope to a normalized inbound
 // message and hands it to the engine. A non-nil handler error is an
 // infrastructure failure; it propagates so the supervisor reconnects. A
@@ -185,8 +205,14 @@ func (c *slackChannel) dispatchEventsAPI(ctx context.Context, e slackevents.Even
 	)
 	switch inner := e.InnerEvent.Data.(type) {
 	case *slackevents.AppMentionEvent:
+		if inner == nil {
+			return nil
+		}
 		msg, ok = inboundFromAppMention(e, inner, c.botUserID, mentionRe)
 	case *slackevents.MessageEvent:
+		if inner == nil {
+			return nil
+		}
 		msg, ok = inboundFromMessage(e, inner, c.botUserID, mentionRe)
 	default:
 		return nil
@@ -220,6 +246,8 @@ func (c *slackChannel) dispatchSlashCommand(cmd slack.SlashCommand, envelopeID s
 type ChannelDeps struct {
 	Decrypt Decrypter
 	Logger  *slog.Logger
+	// Autopilot optionally ingests reports from explicitly configured channels.
+	Autopilot AutopilotEventHandler
 	// Slash handles `/issue` and `/new` commands delivered over Socket Mode. Nil
 	// leaves slash-command handling off (the connection still serves messages
 	// and @-mentions); tests that only exercise inbound messages pass nil.
@@ -261,6 +289,7 @@ func newSlackFactory(deps ChannelDeps) channel.Factory {
 			appToken:  appToken,
 			botAPI:    slack.New(botToken),
 			handler:   cfg.Handler,
+			autopilot: deps.Autopilot,
 			slash:     deps.Slash,
 			logger:    logger,
 		}, nil

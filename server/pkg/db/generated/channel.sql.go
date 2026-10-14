@@ -233,26 +233,30 @@ func (q *Queries) BackfillChannelInstallationRegionToFeishuLark(ctx context.Cont
 const channelMediaObjectIsReferenced = `-- name: ChannelMediaObjectIsReferenced :one
 SELECT EXISTS (
     SELECT 1 FROM attachment
-    WHERE chat_message_id = $1
-      AND workspace_id = $2
-      AND url = $3
+    WHERE workspace_id = $1
+      AND url = $2
+      AND (chat_message_id = $3 OR issue_id IS NOT NULL)
 ) AS referenced
 `
 
 type ChannelMediaObjectIsReferencedParams struct {
-	ChatMessageID pgtype.UUID `json:"chat_message_id"`
 	WorkspaceID   pgtype.UUID `json:"workspace_id"`
 	StorageUrl    string      `json:"storage_url"`
+	ChatMessageID pgtype.UUID `json:"chat_message_id"`
 }
 
 // The post-claim reference check: an attachment row carrying this object's
-// URL on the intended message. Only meaningful AFTER the claim flipped the
-// row to 'deleting' — from that point a bind can no longer succeed on the
+// URL on the intended message or an issue in the same workspace. Native
+// integration autopilots use a delivery UUID as the intent owner and bind
+// media directly to an issue, whose attachment has no chat_message_id.
+// A stale retry can record another intent after that issue bind committed;
+// its durable attachment must keep the object alive. Only meaningful AFTER
+// the claim flipped the row to 'deleting' — from that point a bind can no longer succeed on the
 // key, so a negative answer is terminal, not a snapshot race. Re-run on every
 // tombstone pass as well: a positive answer there is an invariant violation,
 // and the object is kept and reported rather than deleted.
 func (q *Queries) ChannelMediaObjectIsReferenced(ctx context.Context, arg ChannelMediaObjectIsReferencedParams) (bool, error) {
-	row := q.db.QueryRow(ctx, channelMediaObjectIsReferenced, arg.ChatMessageID, arg.WorkspaceID, arg.StorageUrl)
+	row := q.db.QueryRow(ctx, channelMediaObjectIsReferenced, arg.WorkspaceID, arg.StorageUrl, arg.ChatMessageID)
 	var referenced bool
 	err := row.Scan(&referenced)
 	return referenced, err

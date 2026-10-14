@@ -446,6 +446,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		ServerVersion:            normalizeServerVersion(version),
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
+	// Native queued deliveries keep their provenance across redeploys. An empty
+	// route set must reject those deliveries even when Slack is disabled, while
+	// ordinary HTTP webhooks pass through this callback unchanged.
+	h.AutopilotService.PrepareIssueMedia = handler.NewSlackAutopilotIntake(h, nil, nil, nil).PrepareIssueMedia
 	invitationRateLimits := handler.DefaultInvitationRateLimits()
 	invitationRateLimits.Actor.Limit = envNonNegativeInt("RATE_LIMIT_INVITATION_ACTOR_10M", invitationRateLimits.Actor.Limit)
 	invitationRateLimits.Workspace.Limit = envNonNegativeInt("RATE_LIMIT_INVITATION_WORKSPACE_24H", invitationRateLimits.Workspace.Limit)
@@ -850,7 +854,18 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			// Socket Mode connection per active Slack installation, authenticated
 			// with that installation's OWN app-level token (xapp-, pasted at BYO
 			// install) — no deployment-level app token, no single connection.
-			slack.RegisterSlack(channelRegistry, slack.ChannelDeps{Decrypt: box.Open, Logger: slog.Default(), Slash: slackSlash})
+			var slackAutopilot slack.AutopilotEventHandler
+			if routes, routeErr := slack.ParseAutopilotRoutes(os.Getenv("MULTICA_SLACK_AUTOPILOT_ROUTES")); routeErr != nil {
+				slog.Error("slack: invalid autopilot routes; automatic intake disabled", "error", routeErr)
+			} else if len(routes) > 0 {
+				intake := handler.NewSlackAutopilotIntake(h, routes, slackMedia, box.Open)
+				slackAutopilot = intake
+				h.AutopilotService.PrepareIssueMedia = intake.PrepareIssueMedia
+				slog.Info("slack: automatic channel intake enabled", "routes", len(routes))
+			}
+			slack.RegisterSlack(channelRegistry, slack.ChannelDeps{
+				Decrypt: box.Open, Logger: slog.Default(), Slash: slackSlash, Autopilot: slackAutopilot,
+			})
 
 			// BYO self-serve install (paste bot token + app-level token). The
 			// InstallService needs only the at-rest encryption key — there is no

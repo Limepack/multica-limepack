@@ -40,6 +40,9 @@ type AutopilotService struct {
 	TaskSvc      *TaskService
 	Entitlements entitlement.Provider
 	QuotaMetrics AutopilotQuotaMetrics
+	// PrepareIssueMedia resolves trusted integration media before the issue's
+	// transaction begins. The issue and its attachments commit before dispatch.
+	PrepareIssueMedia func(context.Context, db.Autopilot, db.AutopilotRun) (AutopilotIssueMedia, error)
 }
 
 // DefaultAutopilotTriggerTimezone is the timezone used to render Autopilot
@@ -615,6 +618,11 @@ func (s *AutopilotService) dispatchAutopilotRun(
 	case "create_issue":
 		triggerTimezone := s.resolveAutopilotTriggerTimezone(ctx, triggerID)
 		if err := s.dispatchCreateIssue(ctx, autopilot, run, triggerTimezone, actorUserID); err != nil {
+			if run.WebhookDeliveryID.Valid && (errors.Is(err, ErrAutopilotIssueMediaPreparation) || errors.Is(err, ErrWebhookDeliveryLeaseLost)) {
+				// Keep the same admitted run for the durable worker's retry. No
+				// issue or task exists yet, and its quota reservation is retained.
+				return run, dispatch.ReasonInternalError, fmt.Errorf("dispatch create_issue: %w", err)
+			}
 			if skipped, code := s.handleDispatchSkip(ctx, autopilot, run, err); skipped != nil {
 				return skipped, code, nil
 			}
@@ -684,6 +692,18 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 		return fmt.Errorf("resolve leader: %w", err)
 	}
 	issueCountPolicy := ResolveIssueCountPolicy(ctx, s.Entitlements, ap.WorkspaceID)
+	var prepared AutopilotIssueMedia
+	if s.PrepareIssueMedia != nil {
+		prepared, err = s.PrepareIssueMedia(ctx, ap, *run)
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrAutopilotIssueMediaPreparation, err)
+		}
+	}
+	title := s.interpolateTemplate(ap, *run, triggerTimezone)
+	description := s.buildIssueDescription(ap, *run, triggerTimezone)
+	if prepared.DescriptionAppendix != "" {
+		description = pgtype.Text{String: strings.TrimSpace(description.String) + "\n\n" + prepared.DescriptionAppendix, Valid: true}
+	}
 
 	tx, err := s.TxStarter.Begin(ctx)
 	if err != nil {
@@ -692,9 +712,34 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 	defer tx.Rollback(ctx)
 
 	qtx := s.Queries.WithTx(tx)
-
-	title := s.interpolateTemplate(ap, *run, triggerTimezone)
-	description := s.buildIssueDescription(ap, *run, triggerTimezone)
+	if run.WebhookDeliveryID.Valid {
+		lease, ok := ctx.Value(webhookDeliveryLeaseKey{}).(webhookDeliveryLease)
+		if !ok || lease.deliveryID != run.WebhookDeliveryID || !lease.token.Valid {
+			return ErrWebhookDeliveryLeaseLost
+		}
+		if _, err := qtx.LockWebhookDeliveryForDispatch(ctx, db.LockWebhookDeliveryForDispatchParams{
+			ID: run.WebhookDeliveryID, WorkspaceID: ap.WorkspaceID, LeaseToken: lease.token,
+		}); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrWebhookDeliveryLeaseLost
+			}
+			return fmt.Errorf("lock delivery for issue dispatch: %w", err)
+		}
+		current, err := qtx.LockAutopilotRunForDispatch(ctx, db.LockAutopilotRunForDispatchParams{ID: run.ID, WorkspaceID: ap.WorkspaceID})
+		if err != nil {
+			return fmt.Errorf("lock run for issue dispatch: %w", err)
+		}
+		if isAutopilotRunComplete(current) {
+			*run = current
+			if err := tx.Commit(ctx); err != nil {
+				return fmt.Errorf("commit recovered issue dispatch: %w", err)
+			}
+			if current.IssueID.Valid {
+				return s.ensureWebhookCreateIssueTask(ctx, ap, current)
+			}
+			return nil
+		}
+	}
 
 	// Refresh the autopilot row at dispatch time so we use the current project
 	// binding instead of any stale snapshot the caller may have cached.
@@ -759,6 +804,9 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 	})
 	if err != nil {
 		return fmt.Errorf("create issue: %w", err)
+	}
+	if err := bindAutopilotIssueMedia(ctx, qtx, &issue, prepared); err != nil {
+		return fmt.Errorf("bind issue media: %w", err)
 	}
 
 	// Fan out the default subscriber template inside the same tx as the
@@ -1840,7 +1888,7 @@ func (s *AutopilotService) interpolateTemplate(ap db.Autopilot, run db.Autopilot
 		tmpl = ap.IssueTitleTemplate.String
 	}
 	triggerDate := formatAutopilotRunDate(run, triggerTimezone)
-	return issueTitleTemplateTokenRE.ReplaceAllStringFunc(tmpl, func(match string) string {
+	title := issueTitleTemplateTokenRE.ReplaceAllStringFunc(tmpl, func(match string) string {
 		name := strings.TrimSpace(match[2 : len(match)-2])
 		switch name {
 		case "date":
@@ -1849,6 +1897,13 @@ func (s *AutopilotService) interpolateTemplate(ap db.Autopilot, run db.Autopilot
 			return match
 		}
 	})
+	if run.WebhookDeliveryID.Valid {
+		// A distinct webhook delivery represents distinct work, even when its
+		// title template is static. Keep the recent-title guard useful for
+		// schedules while giving every durable delivery a stable identity.
+		title += " [" + util.UUIDToString(run.WebhookDeliveryID) + "]"
+	}
+	return title
 }
 
 // SupportedIssueTitleTemplateVariables enumerates the placeholders that

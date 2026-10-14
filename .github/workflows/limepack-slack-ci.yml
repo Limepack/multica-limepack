@@ -1,0 +1,158 @@
+name: Limepack Slack bug autopilot
+
+on:
+  push:
+    branches: [slack-bug-autopilot]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: limepack-slack-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    if: github.ref == 'refs/heads/slack-bug-autopilot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: multica
+          POSTGRES_USER: multica
+          POSTGRES_PASSWORD: multica
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U multica -d multica"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://multica:multica@localhost:5432/multica?sslmode=disable
+      REDIS_TEST_URL: redis://localhost:6379/1
+      GOFLAGS: -count=1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      # Use the established CI migration path against this job's disposable DB.
+      - name: Apply database migrations
+        working-directory: server
+        run: go run ./cmd/migrate up
+
+      - name: Test Slack, handlers, autopilot services, and server wiring
+        working-directory: server
+        shell: bash
+        run: |
+          set -o pipefail
+          bash ../scripts/go-test-with-agent-cli-guard.sh -- \
+            go test -race -json -timeout=15m \
+              ./internal/integrations/slack ./internal/handler \
+              ./internal/service ./cmd/server \
+            | tee "$RUNNER_TEMP/limepack-slack-tests.jsonl"
+
+      # Several upstream DB suites deliberately pass when their DB is absent.
+      # Require real DB/Redis tests to pass so that cannot produce green CI here.
+      - name: Confirm database and Redis tests executed
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          prefix = "github.com/multica-ai/multica/server/"
+          packages = {
+              prefix + name for name in (
+                  "internal/integrations/slack", "internal/handler",
+                  "internal/service", "cmd/server",
+              )
+          }
+          required = {
+              (prefix + "internal/handler", "TestListAutopilots_DerivedFields"),
+              (prefix + "internal/handler", "TestSlackAutopilotNativeDedupeAndDistinctReports"),
+              (prefix + "internal/handler", "TestSlackAutopilotRouteScopeAndInstallationIdentity"),
+              (prefix + "internal/handler", "TestSlackAutopilotRejectsTriggerOwnedByAnotherAutopilot"),
+              (prefix + "internal/handler", "TestSlackAutopilotMediaRequiresNativeProvenanceAndInstalledContext"),
+              (prefix + "internal/handler", "TestSlackAutopilotPermanentAttachmentWarningCreatesIssue"),
+              (prefix + "internal/handler", "TestSlackAutopilotMediaRetryPreservesRunAndAttachesBeforeDispatch"),
+              (prefix + "internal/handler", "TestSlackAutopilotMediaExhaustionSettlesRunAndDelivery"),
+              (prefix + "internal/handler", "TestSlackAutopilotFinalAttachmentAttemptPreservesReport"),
+              (prefix + "internal/service", "TestResolveAutopilotNotificationRecipientRejectsFormerMember"),
+              (prefix + "internal/service", "TestEmptyClaimCache_MarkAndIsEmptyVersionMatched"),
+              (prefix + "internal/service", "TestAutopilotMediaBindsAtomicallyWithIssue"),
+              (prefix + "internal/service", "TestWebhookIssueTitlesDistinctAndStable"),
+              (prefix + "internal/service", "TestAutopilotIssueMediaReconcilePreservesBoundScreenshot"),
+              (prefix + "cmd/server", "TestIssuesCRUDThroughRouter"),
+          }
+          passed_packages = set()
+          passed_tests = set()
+          path = Path(os.environ["RUNNER_TEMP"]) / "limepack-slack-tests.jsonl"
+          for line in path.read_text().splitlines():
+              event = json.loads(line)
+              if event.get("Action") != "pass":
+                  continue
+              package = event.get("Package")
+              test = event.get("Test")
+              if test:
+                  passed_tests.add((package, test))
+              else:
+                  passed_packages.add(package)
+          missing = (packages - passed_packages) | {
+              f"{package}: {test}" for package, test in required - passed_tests
+          }
+          if missing:
+              raise SystemExit("Required test execution missing: " + ", ".join(sorted(missing)))
+          print("All four packages and required database/Redis tests passed.")
+          PY
+
+      - name: Retain test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: limepack-slack-test-results
+          path: ${{ runner.temp }}/limepack-slack-tests.jsonl
+          if-no-files-found: ignore
+          retention-days: 7
+
+  backend-image:
+    needs: backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the official backend Dockerfile
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          build-args: |
+            VERSION=0.6.1-limepack-slack
+            COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=limepack-slack-backend
+          cache-to: type=gha,mode=max,scope=limepack-slack-backend

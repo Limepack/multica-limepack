@@ -169,6 +169,51 @@ After disconnecting, the Socket Mode connection stops and the Bot no longer rece
 
 ## Self-hosting setup
 
+### Automatically investigate a report channel
+
+A self-hosted deployment can route new top-level human messages from selected
+channels to an existing Autopilot. Create an agent-assigned Autopilot in
+**Create issue** mode, write its instructions in the editable **Runbook**, and
+add a **Webhook** trigger. Then set this backend environment variable and
+redeploy:
+
+```text
+MULTICA_SLACK_AUTOPILOT_ROUTES=[{"workspace_id":"<workspace UUID>","agent_id":"<agent UUID>","team_id":"<Slack team ID>","channel_id":"<Slack channel ID>","autopilot_id":"<Autopilot UUID>","trigger_id":"<webhook trigger UUID>"}]
+```
+
+The connected Slack app must already subscribe to `message.channels` (or
+`message.groups` for a private channel) and be invited to that channel. Keep
+Socket Mode enabled. No webhook URL or Slack token belongs in this route map.
+The target Autopilot must belong to the configured workspace and be assigned
+to the configured agent. It acts under the webhook trigger's creator, whose
+workspace membership and agent access are checked on every run; Slack
+reporters do not each need a Multica account binding.
+
+Each report is persisted in the existing webhook delivery queue before Slack
+is acknowledged. Duplicate deliveries and the `message`/`app_mention` pair
+for one message create one issue; separate messages create separate issues.
+Thread replies, bots, edits, and Slack system events do not start new reports.
+Messages routed to an Autopilot do not also start a Chat. DMs and mentions
+outside configured channels retain their normal behavior.
+
+Issues include a link to the original Slack message. Slack-hosted screenshots
+and files are downloaded with the installed bot credential and attached before
+the agent starts. Object storage and `files:read` are needed for this import.
+The existing limits are 10 files and 20 MiB per file; excluded files and missing
+storage produce an explicit warning on the issue. Transient download failures
+retry through the durable queue. After five attempts, the issue preserves the
+report text, any successfully imported files, and a warning about unavailable
+files. Authorization or provenance failures remain visible in delivery and run
+history. File downloads never send credentials outside
+Slack's allowed hosts.
+
+Pause the Autopilot or disable its webhook trigger in Multica to stop intake
+dispatch. Its Runbook remains editable without redeploying. Removing the route
+or revoking the Slack installation also stops its queued report execution.
+An empty route array disables automatic intake.
+
+### Slack token encryption
+
 Multica Cloud needs no extra configuration. A self-hosted deployment must first set a key used to encrypt Slack tokens:
 
 ```dotenv

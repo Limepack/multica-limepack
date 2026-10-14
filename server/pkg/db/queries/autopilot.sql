@@ -2,6 +2,14 @@
 -- Autopilot CRUD
 -- =====================
 
+-- name: LockAutopilotRunForDispatch :one
+-- Serialize recoverable issue creation and final preparation failure for one
+-- run, with the owning workspace explicitly checked.
+SELECT r.* FROM autopilot_run r
+JOIN autopilot a ON a.id = r.autopilot_id
+WHERE r.id = @id AND a.workspace_id = @workspace_id
+FOR UPDATE OF r;
+
 -- name: ListAutopilots :many
 -- List rows carry three derived columns the list UI needs (trigger badges,
 -- next run, last-run outcome) so the page never has to N+1 into the detail

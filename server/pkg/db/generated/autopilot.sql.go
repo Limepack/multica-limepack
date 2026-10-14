@@ -1428,7 +1428,6 @@ func (q *Queries) ListAutopilotTriggers(ctx context.Context, autopilotID pgtype.
 }
 
 const listAutopilots = `-- name: ListAutopilots :many
-
 SELECT
   a.id, a.workspace_id, a.title, a.description, a.assignee_id, a.status, a.execution_mode, a.issue_title_template, a.created_by_type, a.created_by_id, a.last_run_at, a.created_at, a.updated_at, a.assignee_type, a.project_id, a.pause_reason,
   (
@@ -1469,9 +1468,6 @@ type ListAutopilotsRow struct {
 	LastRunStatus string             `json:"last_run_status"`
 }
 
-// =====================
-// Autopilot CRUD
-// =====================
 // List rows carry three derived columns the list UI needs (trigger badges,
 // next run, last-run outcome) so the page never has to N+1 into the detail
 // endpoint. trigger_kinds/next_run_at only consider ENABLED triggers — the
@@ -1624,6 +1620,50 @@ func (q *Queries) LockAutopilotForUpdate(ctx context.Context, arg LockAutopilotF
 		&i.AssigneeType,
 		&i.ProjectID,
 		&i.PauseReason,
+	)
+	return i, err
+}
+
+const lockAutopilotRunForDispatch = `-- name: LockAutopilotRunForDispatch :one
+
+SELECT r.id, r.autopilot_id, r.trigger_id, r.source, r.status, r.issue_id, r.task_id, r.triggered_at, r.completed_at, r.failure_reason, r.trigger_payload, r.result, r.created_at, r.squad_id, r.planned_at, r.webhook_delivery_id, r.quota_reservation_id, r.reason_code FROM autopilot_run r
+JOIN autopilot a ON a.id = r.autopilot_id
+WHERE r.id = $1 AND a.workspace_id = $2
+FOR UPDATE OF r
+`
+
+type LockAutopilotRunForDispatchParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// =====================
+// Autopilot CRUD
+// =====================
+// Serialize recoverable issue creation and final preparation failure for one
+// run, with the owning workspace explicitly checked.
+func (q *Queries) LockAutopilotRunForDispatch(ctx context.Context, arg LockAutopilotRunForDispatchParams) (AutopilotRun, error) {
+	row := q.db.QueryRow(ctx, lockAutopilotRunForDispatch, arg.ID, arg.WorkspaceID)
+	var i AutopilotRun
+	err := row.Scan(
+		&i.ID,
+		&i.AutopilotID,
+		&i.TriggerID,
+		&i.Source,
+		&i.Status,
+		&i.IssueID,
+		&i.TaskID,
+		&i.TriggeredAt,
+		&i.CompletedAt,
+		&i.FailureReason,
+		&i.TriggerPayload,
+		&i.Result,
+		&i.CreatedAt,
+		&i.SquadID,
+		&i.PlannedAt,
+		&i.WebhookDeliveryID,
+		&i.QuotaReservationID,
+		&i.ReasonCode,
 	)
 	return i, err
 }

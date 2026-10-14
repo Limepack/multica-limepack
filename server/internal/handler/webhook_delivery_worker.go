@@ -188,6 +188,7 @@ func (w *WebhookDeliveryWorker) ProcessNext(ctx context.Context) (bool, error) {
 		}
 	}
 
+	ctx = service.WithWebhookDeliveryLease(ctx, delivery.ID, delivery.LeaseToken)
 	run, dispatchErr := w.h.AutopilotService.DispatchAutopilotForWebhookDelivery(
 		ctx,
 		autopilot,
@@ -196,6 +197,12 @@ func (w *WebhookDeliveryWorker) ProcessNext(ctx context.Context) (bool, error) {
 		delivery.ID,
 	)
 	if dispatchErr != nil {
+		if errors.Is(dispatchErr, service.ErrWebhookDeliveryLeaseLost) {
+			return true, nil
+		}
+		if errors.Is(dispatchErr, service.ErrAutopilotIssueMediaPreparation) && run != nil {
+			return true, w.retryIssueMedia(ctx, delivery, *run, dispatchErr)
+		}
 		var quotaErr *service.AutopilotQuotaExceededError
 		if errors.As(dispatchErr, &quotaErr) {
 			return true, w.complete(ctx, delivery, deliveryStatusIgnored, pgtype.UUID{}, quotaErr.Error(), "quota_exceeded")
@@ -221,6 +228,60 @@ func (w *WebhookDeliveryWorker) ProcessNext(ctx context.Context) (bool, error) {
 		)
 	}
 	return true, w.complete(ctx, delivery, deliveryStatusDispatched, run.ID, "")
+}
+
+// retryIssueMedia keeps the admitted run recoverable while attachment fetching
+// retries. The final delivery transition and run failure share the lease-fenced
+// transaction, so an expired worker cannot fail a newer successful dispatch.
+func (w *WebhookDeliveryWorker) retryIssueMedia(ctx context.Context, delivery db.WebhookDelivery, run db.AutopilotRun, cause error) error {
+	if delivery.DispatchAttempts+1 < webhookWorkerMaxAttempts {
+		return w.retryOrFail(ctx, delivery, cause)
+	}
+	tx, err := w.h.TxStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin media failure: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	qtx := w.h.Queries.WithTx(tx)
+	_, err = qtx.LockWebhookDeliveryForDispatch(ctx, db.LockWebhookDeliveryForDispatchParams{
+		ID: delivery.ID, WorkspaceID: delivery.WorkspaceID, LeaseToken: delivery.LeaseToken,
+	})
+	lost, err := handleWebhookLeaseMutation("lock media failure", delivery, err)
+	if err != nil || lost {
+		return err
+	}
+	currentRun, err := qtx.LockAutopilotRunForDispatch(ctx, db.LockAutopilotRunForDispatchParams{
+		ID: run.ID, WorkspaceID: delivery.WorkspaceID,
+	})
+	if err != nil {
+		return fmt.Errorf("lock media run: %w", err)
+	}
+	status := deliveryStatusFailed
+	reason := pgtype.Text{String: cause.Error(), Valid: true}
+	reasonCode := pgtype.Text{String: "attachment_preparation_failed", Valid: true}
+	if currentRun.IssueID.Valid || currentRun.TaskID.Valid || currentRun.Status == "completed" {
+		status, reason, reasonCode = deliveryStatusDispatched, pgtype.Text{}, pgtype.Text{}
+	}
+	_, err = qtx.CompleteClaimedWebhookDelivery(ctx, db.CompleteClaimedWebhookDeliveryParams{
+		ID: delivery.ID, LeaseToken: delivery.LeaseToken, Status: status,
+		AutopilotRunID: currentRun.ID, Error: reason, ReasonCode: reasonCode,
+	})
+	lost, err = handleWebhookLeaseMutation("complete media failure", delivery, err)
+	if err != nil || lost {
+		return err
+	}
+	mediaService := *w.h.AutopilotService
+	mediaService.Queries = qtx
+	if status == deliveryStatusFailed {
+		if err := mediaService.FailIssueMediaPreparation(ctx, currentRun.ID, delivery.WorkspaceID, cause.Error()); err != nil {
+			return fmt.Errorf("fail media run: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit media failure: %w", err)
+	}
+	w.h.Metrics.RecordWebhookDelivery(delivery.Provider, status)
+	return nil
 }
 
 func (w *WebhookDeliveryWorker) complete(

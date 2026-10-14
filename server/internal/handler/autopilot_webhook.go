@@ -447,7 +447,7 @@ func (h *Handler) HandleAutopilotWebhook(w http.ResponseWriter, r *http.Request)
 	sigStatus := verifyWebhookSignatureForProvider(provider, trigRow.SigningSecret.String, r.Header, body)
 
 	// 7. Persist (INSERT delivery). Dedupe collision → bump existing row.
-	delivery, dup, err := h.persistInboundDelivery(r, persistDeliveryInput{
+	delivery, dup, err := h.persistInboundDelivery(r.Context(), persistDeliveryInput{
 		WorkspaceID:     autopilot.WorkspaceID,
 		AutopilotID:     autopilot.ID,
 		TriggerID:       trigRow.ID,
@@ -798,7 +798,7 @@ type persistDeliveryInput struct {
 // false, nil) on the happy path. On dedupe-key unique-violation it returns
 // (existing-row, true, nil) after bumping attempt_count on the prior row.
 // Any other error bubbles up so the handler can 500 cleanly.
-func (h *Handler) persistInboundDelivery(r *http.Request, in persistDeliveryInput) (db.WebhookDelivery, bool, error) {
+func (h *Handler) persistInboundDelivery(ctx context.Context, in persistDeliveryInput) (db.WebhookDelivery, bool, error) {
 	params := db.CreateWebhookDeliveryParams{
 		ID:              dbid.NewV7(),
 		WorkspaceID:     in.WorkspaceID,
@@ -819,7 +819,7 @@ func (h *Handler) persistInboundDelivery(r *http.Request, in persistDeliveryInpu
 		params.ContentType = pgtype.Text{String: in.ContentType, Valid: true}
 	}
 
-	delivery, err := h.Queries.CreateWebhookDelivery(r.Context(), params)
+	delivery, err := h.Queries.CreateWebhookDelivery(ctx, params)
 	if err == nil {
 		return delivery, false, nil
 	}
@@ -827,14 +827,14 @@ func (h *Handler) persistInboundDelivery(r *http.Request, in persistDeliveryInpu
 		return db.WebhookDelivery{}, false, err
 	}
 	// Dedupe collision: fetch the original row, bump attempt count.
-	existing, lookupErr := h.Queries.GetWebhookDeliveryByTriggerAndDedupe(r.Context(), db.GetWebhookDeliveryByTriggerAndDedupeParams{
+	existing, lookupErr := h.Queries.GetWebhookDeliveryByTriggerAndDedupe(ctx, db.GetWebhookDeliveryByTriggerAndDedupeParams{
 		TriggerID: in.TriggerID,
 		DedupeKey: pgtype.Text{String: in.DedupeKey, Valid: true},
 	})
 	if lookupErr != nil {
 		return db.WebhookDelivery{}, false, fmt.Errorf("lookup duplicate delivery: %w", lookupErr)
 	}
-	bumped, bumpErr := h.Queries.BumpWebhookDeliveryAttempt(r.Context(), existing.ID)
+	bumped, bumpErr := h.Queries.BumpWebhookDeliveryAttempt(ctx, existing.ID)
 	if bumpErr != nil {
 		// Still treat as duplicate; just log the bump failure so the
 		// operator can investigate, returning the row we DID read.

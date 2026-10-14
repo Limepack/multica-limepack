@@ -335,8 +335,11 @@ type MediaIntentLedger interface {
 // the reconciler can check for a durable reference. InstallationID is an
 // ops-diagnostic only.
 type RecordPendingMediaObjectParams struct {
-	StorageKey     string
-	WorkspaceID    pgtype.UUID
+	StorageKey  string
+	WorkspaceID pgtype.UUID
+	// ChatMessageID is the durable media owner UUID. Native Autopilot intake
+	// uses its webhook delivery ID in this existing ledger column; attachment
+	// binding consumes the intent in the issue transaction.
 	ChatMessageID  pgtype.UUID
 	StorageURL     string
 	InstallationID pgtype.UUID

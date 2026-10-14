@@ -33,6 +33,15 @@ WHERE id = $1;
 SELECT * FROM webhook_delivery
 WHERE id = $1 AND workspace_id = $2;
 
+-- name: LockWebhookDeliveryForDispatch :one
+-- Fence side effects after slow media I/O. An expired worker cannot create
+-- an issue; the row lock also keeps a new claimant out until commit.
+SELECT * FROM webhook_delivery
+WHERE id = @id AND workspace_id = @workspace_id
+  AND lease_token = @lease_token AND status = 'queued'
+  AND lease_expires_at > now()
+FOR UPDATE;
+
 -- name: GetWebhookDeliveryByTriggerAndDedupe :one
 -- Looks up the existing delivery for a (trigger, dedupe_key) pair so that
 -- duplicate requests return the original delivery_id / autopilot_run_id.

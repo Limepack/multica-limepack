@@ -351,8 +351,11 @@ func slackMediaKind(contentType string) channel.MsgType {
 	return channel.MsgTypeFile
 }
 
-// slackMediaObjectKey derives the object key from the CHAT message the object
-// will be attached to, not from the platform message alone: a platform message
+// slackMediaObjectKey derives the object key from the durable inbound owner
+// (a Chat message, or a webhook delivery for native Slack Autopilot intake). The
+// existing ledger's chat_message_id column stores either owner UUID; binding
+// consumes its intent atomically with the issue/chat attachment insert.
+// Keys must not use the platform message alone: a platform message
 // can be ingested twice (the inbound dedup claim is reclaimable once stale),
 // and a shared key would run the second ingest into the first one's ledger
 // row — possibly a tombstone the intent upsert refuses, silently dropping the
