@@ -1,20 +1,20 @@
-name: Limepack Slack bug autopilot
+name: Limepack backend CI
 
 on:
   push:
-    branches: [slack-bug-autopilot]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: limepack-slack-${{ github.ref }}
+  group: limepack-backend-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   backend:
-    if: github.ref == 'refs/heads/slack-bug-autopilot'
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     services:
@@ -68,7 +68,7 @@ jobs:
             go test -race -json -timeout=15m \
               ./internal/integrations/slack ./internal/handler \
               ./internal/service ./cmd/server \
-            | tee "$RUNNER_TEMP/limepack-slack-tests.jsonl"
+            | tee "$RUNNER_TEMP/limepack-backend-tests.jsonl"
 
       # Several upstream DB suites deliberately pass when their DB is absent.
       # Require real DB/Redis tests to pass so that cannot produce green CI here.
@@ -126,7 +126,7 @@ jobs:
           }
           passed_packages = set()
           passed_tests = set()
-          path = Path(os.environ["RUNNER_TEMP"]) / "limepack-slack-tests.jsonl"
+          path = Path(os.environ["RUNNER_TEMP"]) / "limepack-backend-tests.jsonl"
           for line in path.read_text().splitlines():
               event = json.loads(line)
               if event.get("Action") != "pass":
@@ -149,8 +149,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: limepack-slack-test-results
-          path: ${{ runner.temp }}/limepack-slack-tests.jsonl
+          name: limepack-backend-test-results
+          path: ${{ runner.temp }}/limepack-backend-tests.jsonl
           if-no-files-found: ignore
           retention-days: 7
 
@@ -164,6 +164,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      # Upstream bumps this manifest on every release, so the label follows the rebase.
+      - name: Read upstream version
+        id: version
+        run: echo "version=$(jq -r .version apps/web/package.json)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -183,15 +188,15 @@ jobs:
           file: Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/limepack/multica-limepack-backend:slack-bug-${{ github.sha }}
+          tags: ghcr.io/limepack/multica-limepack-backend:main-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/Limepack/multica-limepack
             org.opencontainers.image.revision=${{ github.sha }}
           build-args: |
-            VERSION=0.6.1-limepack-slack
+            VERSION=${{ steps.version.outputs.version }}-limepack
             COMMIT=${{ github.sha }}
-          cache-from: type=gha,scope=limepack-slack-backend
-          cache-to: type=gha,mode=max,scope=limepack-slack-backend
+          cache-from: type=gha,scope=limepack-backend
+          cache-to: type=gha,mode=max,scope=limepack-backend
 
       - name: Record immutable deployment image
         env:
