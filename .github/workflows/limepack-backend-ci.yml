@@ -203,3 +203,30 @@ jobs:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           printf 'Backend image: `ghcr.io/limepack/multica-limepack-backend@%s`\n' "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+
+      # Railway is not linked to GitHub, so the workflow points the backend
+      # service at the digest it just published and triggers a deploy.
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          IMAGE: ghcr.io/limepack/multica-limepack-backend@${{ steps.build.outputs.digest }}
+          SERVICE_ID: 81d49c04-5557-4790-9d87-a685ee59ef4d
+          ENVIRONMENT_ID: e9ccc4c6-594d-47f2-9abf-02c9d840a70e
+        run: |
+          # GraphQL answers HTTP 200 even on failure, so check the body for errors.
+          railway_graphql() {
+            resp=$(curl -sSf https://backboard.railway.com/graphql/v2 \
+              -H "Project-Access-Token: $RAILWAY_TOKEN" \
+              -H 'content-type: application/json' \
+              --data "$(jq -cn --arg q "$1" --argjson v "$2" '{query: $q, variables: $v}')")
+            echo "$resp"
+            jq -e '.errors == null' <<<"$resp" >/dev/null
+          }
+          ids=$(jq -cn --arg s "$SERVICE_ID" --arg e "$ENVIRONMENT_ID" '{serviceId: $s, environmentId: $e}')
+          railway_graphql \
+            'mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input) }' \
+            "$(jq -c --arg i "$IMAGE" '. + {input: {source: {image: $i}}}' <<<"$ids")"
+          railway_graphql \
+            'mutation($serviceId: String!, $environmentId: String!) { serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId) }' \
+            "$ids"
+          printf 'Deployed to Railway backend: `%s`\n' "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
