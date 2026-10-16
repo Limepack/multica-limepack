@@ -33,6 +33,7 @@ type AutopilotRoute struct {
 var (
 	autopilotTeamID    = regexp.MustCompile(`^T[A-Z0-9]+$`)
 	autopilotChannelID = regexp.MustCompile(`^[CG][A-Z0-9]+$`)
+	autopilotTimestamp = regexp.MustCompile(`^[0-9]+\.[0-9]{6}$`)
 )
 
 // ParseAutopilotRoutes validates MULTICA_SLACK_AUTOPILOT_ROUTES before startup.
@@ -96,14 +97,16 @@ type AutopilotFile struct {
 	DownloadURL string `json:"download_url"`
 }
 
-// AutopilotEvent is a new top-level human report. MessageTS is identical for
-// Slack's message and app_mention pair and is used for durable deduplication.
+// AutopilotEvent is a new human report or thread reply. MessageTS is identical
+// for Slack's message and app_mention pair and anchors durable deduplication.
+// A different ThreadTS identifies a reply to an existing report.
 type AutopilotEvent struct {
 	AppID              string          `json:"app_id"`
 	TeamID             string          `json:"team_id"`
 	ChannelID          string          `json:"channel_id"`
 	UserID             string          `json:"user_id"`
 	MessageTS          string          `json:"message_ts"`
+	ThreadTS           string          `json:"thread_ts,omitempty"`
 	Text               string          `json:"text"`
 	Files              []AutopilotFile `json:"files,omitempty"`
 	AttachmentWarnings []string        `json:"attachment_warnings,omitempty"`
@@ -145,13 +148,17 @@ func AutopilotInboundMessage(report AutopilotEvent) channel.InboundMessage {
 			files = append(files, slackRawFile(file))
 		}
 	}
+	threadTS := report.ThreadTS
+	if threadTS == "" {
+		threadTS = report.MessageTS
+	}
 	return buildInbound(slackevents.EventsAPIEvent{TeamID: report.TeamID, APIAppID: report.AppID}, buildInboundParams{
 		eventType: "message",
 		channelID: report.ChannelID,
 		userID:    report.UserID,
 		text:      report.Text,
 		ts:        report.MessageTS,
-		threadTS:  report.MessageTS,
+		threadTS:  threadTS,
 		chatType:  channel.ChatTypeGroup,
 		addressed: true,
 		files:     files,
@@ -188,10 +195,11 @@ func autopilotEventFrom(e slackevents.EventsAPIEvent, botUserID string) (Autopil
 	default:
 		return AutopilotEvent{}, false
 	}
-	if !autopilotTeamID.MatchString(e.TeamID) || !autopilotChannelID.MatchString(report.ChannelID) || report.UserID == "" || report.MessageTS == "" || botID != "" || (botUserID != "" && report.UserID == botUserID) || (subtype != "" && subtype != "file_share") || (threadTS != "" && threadTS != report.MessageTS) || (strings.TrimSpace(report.Text) == "" && len(files) == 0 && len(report.AttachmentWarnings) == 0) {
+	if !autopilotTeamID.MatchString(e.TeamID) || !autopilotChannelID.MatchString(report.ChannelID) || report.UserID == "" || !autopilotTimestamp.MatchString(report.MessageTS) || (threadTS != "" && !autopilotTimestamp.MatchString(threadTS)) || botID != "" || (botUserID != "" && report.UserID == botUserID) || (subtype != "" && subtype != "file_share" && !(subtype == "thread_broadcast" && threadTS != "" && threadTS != report.MessageTS)) || (strings.TrimSpace(report.Text) == "" && len(files) == 0 && len(report.AttachmentWarnings) == 0) {
 		return AutopilotEvent{}, false
 	}
 	report.AppID, report.TeamID = e.APIAppID, e.TeamID
+	report.ThreadTS = threadTS
 	for _, file := range files {
 		report.Files = append(report.Files, AutopilotFile(file))
 	}

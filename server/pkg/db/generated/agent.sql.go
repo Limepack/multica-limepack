@@ -112,6 +112,52 @@ func (q *Queries) AcknowledgeExhaustedDelegatedFailureRecovery(ctx context.Conte
 	return i, err
 }
 
+const adoptSlackAutopilotTaskThread = `-- name: AdoptSlackAutopilotTaskThread :exec
+UPDATE agent_task_queue task
+SET trigger_comment_id = $1,
+    delivered_comment_ids = CASE WHEN task.status = 'queued' THEN task.delivered_comment_ids
+        ELSE array_append(task.delivered_comment_ids, $1::uuid) END
+FROM issue i, autopilot_run run, comment root
+WHERE run.id = $2 AND run.issue_id = i.id
+  AND i.workspace_id = $3 AND i.origin_type = 'autopilot'
+  AND i.origin_id = run.autopilot_id
+  AND root.id = $1 AND root.issue_id = i.id
+  AND root.workspace_id = i.workspace_id AND root.parent_id IS NULL
+  AND task.id = (SELECT first_task.id FROM agent_task_queue first_task
+      WHERE first_task.issue_id = i.id AND first_task.agent_id = $4
+        AND first_task.context->>'wakeup_id' IS NULL
+        AND first_task.trigger_comment_id IS NULL AND first_task.comment_thread_id IS NULL
+        AND first_task.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+      ORDER BY first_task.created_at, first_task.id LIMIT 1)
+  AND NOT EXISTS (SELECT 1 FROM agent_task_queue scoped
+      WHERE scoped.issue_id = i.id AND scoped.agent_id = $4
+        AND scoped.comment_thread_id = $1
+        AND scoped.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory'))
+  AND task.issue_id = i.id AND task.agent_id = $4
+  AND task.trigger_comment_id IS NULL AND task.comment_thread_id IS NULL
+  AND task.context->>'wakeup_id' IS NULL
+  AND task.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+`
+
+type AdoptSlackAutopilotTaskThreadParams struct {
+	RootCommentID pgtype.UUID `json:"root_comment_id"`
+	RunID         pgtype.UUID `json:"run_id"`
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	AgentID       pgtype.UUID `json:"agent_id"`
+}
+
+// create_issue tasks start without a comment trigger. Move only that run's
+// assignment task into its authenticated Slack thread before merging replies.
+func (q *Queries) AdoptSlackAutopilotTaskThread(ctx context.Context, arg AdoptSlackAutopilotTaskThreadParams) error {
+	_, err := q.db.Exec(ctx, adoptSlackAutopilotTaskThread,
+		arg.RootCommentID,
+		arg.RunID,
+		arg.WorkspaceID,
+		arg.AgentID,
+	)
+	return err
+}
+
 const archiveAgent = `-- name: ArchiveAgent :one
 UPDATE agent SET archived_at = now(), archived_by = $2, updated_at = now()
 WHERE id = $1
@@ -3865,6 +3911,96 @@ func (q *Queries) FailStaleTasks(ctx context.Context, arg FailStaleTasksParams) 
 	return items, nil
 }
 
+const getActiveSlackAutopilotThreadTask = `-- name: GetActiveSlackAutopilotThreadTask :one
+SELECT task.id, task.agent_id, task.issue_id, task.status, task.priority, task.dispatched_at, task.started_at, task.completed_at, task.result, task.error, task.created_at, task.context, task.runtime_id, task.session_id, task.work_dir, task.trigger_comment_id, task.chat_session_id, task.autopilot_run_id, task.attempt, task.max_attempts, task.parent_task_id, task.failure_reason, task.trigger_summary, task.force_fresh_session, task.is_leader_task, task.wait_reason, task.initiator_user_id, task.handoff_note, task.prepare_lease_expires_at, task.squad_id, task.runtime_mcp_overlay, task.escalation_for_task_id, task.fire_at, task.originator_user_id, task.runtime_connected_apps, task.coalesced_comment_ids, task.delivered_comment_ids, task.chat_input_task_id, task.chat_finalize_deferred_at, task.originator_source, task.delegated_from_task_id, task.retry_of_task_id, task.rerun_of_task_id, task.rule_version_id, task.trigger_evidence_kind, task.trigger_evidence_ref_id, task.accountable_user_id, task.session_rollout_missing, task.retired_session_id, task.quick_actions_disabled, task.regenerate_quick_actions_for, task.branch_name, task.durable_work_dir, task.channel_context_revision, task.comment_thread_id, task.cancelled_by_type, task.cancelled_by_id, task.cancelled_by_name, task.issue_snapshot FROM agent_task_queue task
+JOIN issue i ON i.id = task.issue_id
+WHERE i.id = $1 AND i.workspace_id = $2
+  AND task.agent_id = $3 AND task.comment_thread_id = $4
+  AND task.context->>'wakeup_id' IS NULL
+  AND task.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+ORDER BY task.created_at DESC, task.id DESC
+LIMIT 1
+`
+
+type GetActiveSlackAutopilotThreadTaskParams struct {
+	IssueID       pgtype.UUID `json:"issue_id"`
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	AgentID       pgtype.UUID `json:"agent_id"`
+	RootCommentID pgtype.UUID `json:"root_comment_id"`
+}
+
+func (q *Queries) GetActiveSlackAutopilotThreadTask(ctx context.Context, arg GetActiveSlackAutopilotThreadTaskParams) (AgentTaskQueue, error) {
+	row := q.db.QueryRow(ctx, getActiveSlackAutopilotThreadTask,
+		arg.IssueID,
+		arg.WorkspaceID,
+		arg.AgentID,
+		arg.RootCommentID,
+	)
+	var i AgentTaskQueue
+	err := row.Scan(
+		&i.ID,
+		&i.AgentID,
+		&i.IssueID,
+		&i.Status,
+		&i.Priority,
+		&i.DispatchedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.Error,
+		&i.CreatedAt,
+		&i.Context,
+		&i.RuntimeID,
+		&i.SessionID,
+		&i.WorkDir,
+		&i.TriggerCommentID,
+		&i.ChatSessionID,
+		&i.AutopilotRunID,
+		&i.Attempt,
+		&i.MaxAttempts,
+		&i.ParentTaskID,
+		&i.FailureReason,
+		&i.TriggerSummary,
+		&i.ForceFreshSession,
+		&i.IsLeaderTask,
+		&i.WaitReason,
+		&i.InitiatorUserID,
+		&i.HandoffNote,
+		&i.PrepareLeaseExpiresAt,
+		&i.SquadID,
+		&i.RuntimeMcpOverlay,
+		&i.EscalationForTaskID,
+		&i.FireAt,
+		&i.OriginatorUserID,
+		&i.RuntimeConnectedApps,
+		&i.CoalescedCommentIds,
+		&i.DeliveredCommentIds,
+		&i.ChatInputTaskID,
+		&i.ChatFinalizeDeferredAt,
+		&i.OriginatorSource,
+		&i.DelegatedFromTaskID,
+		&i.RetryOfTaskID,
+		&i.RerunOfTaskID,
+		&i.RuleVersionID,
+		&i.TriggerEvidenceKind,
+		&i.TriggerEvidenceRefID,
+		&i.AccountableUserID,
+		&i.SessionRolloutMissing,
+		&i.RetiredSessionID,
+		&i.QuickActionsDisabled,
+		&i.RegenerateQuickActionsFor,
+		&i.BranchName,
+		&i.DurableWorkDir,
+		&i.ChannelContextRevision,
+		&i.CommentThreadID,
+		&i.CancelledByType,
+		&i.CancelledByID,
+		&i.CancelledByName,
+		&i.IssueSnapshot,
+	)
+	return i, err
+}
+
 const getAgent = `-- name: GetAgent :one
 SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, disabled_runtime_skills, service_tier, conversation_starters FROM agent
 WHERE id = $1
@@ -4851,6 +4987,38 @@ func (q *Queries) HasActiveTaskForIssueAndAgentInThread(ctx context.Context, arg
 	var has_active bool
 	err := row.Scan(&has_active)
 	return has_active, err
+}
+
+const hasDeliveredSlackAutopilotReply = `-- name: HasDeliveredSlackAutopilotReply :one
+SELECT EXISTS (SELECT 1 FROM agent_task_queue task
+    JOIN issue i ON i.id = task.issue_id
+    WHERE i.id = $1 AND i.workspace_id = $2
+      AND task.agent_id = $3
+      AND ($4::uuid = ANY(task.delivered_comment_ids)
+           OR EXISTS (SELECT 1 FROM task_supplement supplement
+               WHERE supplement.task_id = task.id
+                 AND supplement.workspace_id = i.workspace_id
+                 AND supplement.comment_id = $4::uuid
+                 AND supplement.status = 'delivered'))) AS delivered
+`
+
+type HasDeliveredSlackAutopilotReplyParams struct {
+	IssueID     pgtype.UUID `json:"issue_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	AgentID     pgtype.UUID `json:"agent_id"`
+	CommentID   pgtype.UUID `json:"comment_id"`
+}
+
+func (q *Queries) HasDeliveredSlackAutopilotReply(ctx context.Context, arg HasDeliveredSlackAutopilotReplyParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasDeliveredSlackAutopilotReply,
+		arg.IssueID,
+		arg.WorkspaceID,
+		arg.AgentID,
+		arg.CommentID,
+	)
+	var delivered bool
+	err := row.Scan(&delivered)
+	return delivered, err
 }
 
 const hasPendingTaskForIssue = `-- name: HasPendingTaskForIssue :one

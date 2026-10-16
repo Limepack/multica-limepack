@@ -18,6 +18,7 @@ import (
 )
 
 const slackAutopilotEvent = "slack.bug_report"
+const slackAutopilotReplyEvent = "slack.bug_report_reply"
 
 // This provenance is written only by Socket Mode ingress. selectedHeadersJSON
 // never accepts it from HTTP callers, so a public webhook cannot ask the Slack
@@ -48,11 +49,15 @@ type SlackAutopilotIntake struct {
 }
 
 func NewSlackAutopilotIntake(h *Handler, routes []slack.AutopilotRoute, media engine.MediaResolver, decrypt slack.Decrypter) *SlackAutopilotIntake {
-	return &SlackAutopilotIntake{h: h, routes: append([]slack.AutopilotRoute(nil), routes...), media: media,
+	intake := &SlackAutopilotIntake{h: h, routes: append([]slack.AutopilotRoute(nil), routes...), media: media,
 		permalink: func(ctx context.Context, installation db.ChannelInstallation, event slack.AutopilotEvent) (string, error) {
 			return slack.AutopilotPermalink(ctx, installation, decrypt, event)
 		},
 	}
+	if len(routes) > 0 {
+		h.SlackAutopilot = intake
+	}
+	return intake
 }
 
 func (s *SlackAutopilotIntake) routeFor(event slack.AutopilotEvent, installation db.ChannelInstallation) (slack.AutopilotRoute, bool) {
@@ -133,7 +138,23 @@ func (s *SlackAutopilotIntake) HandleAutopilotEvent(ctx context.Context, event s
 	if err != nil {
 		return true, err
 	}
-	body, err := json.Marshal(slackAutopilotEnvelope{Event: slackAutopilotEvent, EventPayload: event})
+	eventName := slackAutopilotEvent
+	if isSlackAutopilotReply(event) {
+		parent, parentErr := s.parentDelivery(ctx, ap, trigger, event)
+		if errors.Is(parentErr, pgx.ErrNoRows) && !recentSlackAutopilotThread(event.ThreadTS, time.Now()) {
+			return false, nil
+		}
+		if parentErr != nil && !errors.Is(parentErr, pgx.ErrNoRows) {
+			return true, parentErr
+		}
+		if parentErr == nil {
+			if _, err := nativeSlackAutopilotEvent(parent); err != nil {
+				return false, nil
+			}
+		}
+		eventName = slackAutopilotReplyEvent
+	}
+	body, err := json.Marshal(slackAutopilotEnvelope{Event: eventName, EventPayload: event})
 	if err != nil {
 		return true, fmt.Errorf("encode Slack autopilot event: %w", err)
 	}
@@ -148,7 +169,7 @@ func (s *SlackAutopilotIntake) HandleAutopilotEvent(ctx context.Context, event s
 	}
 	_, _, err = s.h.persistInboundDelivery(ctx, persistDeliveryInput{
 		WorkspaceID: ap.WorkspaceID, AutopilotID: ap.ID, TriggerID: trigger.ID,
-		Provider: "generic", Event: slackAutopilotEvent,
+		Provider: "generic", Event: eventName,
 		DedupeKey:    "slack:" + event.TeamID + ":" + event.ChannelID + ":" + event.MessageTS,
 		DedupeSource: "slack_message", SignatureStatus: sigStatusNotRequired,
 		ContentType: "application/json", RawBody: body, SelectedHeaders: headers,
@@ -196,7 +217,7 @@ func (s *SlackAutopilotIntake) PrepareIssueMedia(ctx context.Context, ap db.Auto
 		return out, fmt.Errorf("decode native Slack report: %w", err)
 	}
 	event := envelope.EventPayload
-	if envelope.Event != slackAutopilotEvent || delivery.AutopilotID != ap.ID || delivery.TriggerID != run.TriggerID ||
+	if (envelope.Event != slackAutopilotEvent && envelope.Event != slackAutopilotReplyEvent) || delivery.AutopilotID != ap.ID || delivery.TriggerID != run.TriggerID ||
 		provenance.AppID != event.AppID || provenance.TeamID != event.TeamID ||
 		provenance.ChannelID != event.ChannelID || provenance.MessageTS != event.MessageTS {
 		return out, errors.New("native Slack delivery provenance mismatch")

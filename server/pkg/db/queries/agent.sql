@@ -2273,6 +2273,56 @@ WHERE issue_id = $1 AND agent_id = $2
   )
   AND comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(sqlc.narg('thread_comment_id')::uuid);
 
+-- name: AdoptSlackAutopilotTaskThread :exec
+-- create_issue tasks start without a comment trigger. Move only that run's
+-- assignment task into its authenticated Slack thread before merging replies.
+UPDATE agent_task_queue task
+SET trigger_comment_id = @root_comment_id,
+    delivered_comment_ids = CASE WHEN task.status = 'queued' THEN task.delivered_comment_ids
+        ELSE array_append(task.delivered_comment_ids, @root_comment_id::uuid) END
+FROM issue i, autopilot_run run, comment root
+WHERE run.id = @run_id AND run.issue_id = i.id
+  AND i.workspace_id = @workspace_id AND i.origin_type = 'autopilot'
+  AND i.origin_id = run.autopilot_id
+  AND root.id = @root_comment_id AND root.issue_id = i.id
+  AND root.workspace_id = i.workspace_id AND root.parent_id IS NULL
+  AND task.id = (SELECT first_task.id FROM agent_task_queue first_task
+      WHERE first_task.issue_id = i.id AND first_task.agent_id = @agent_id
+        AND first_task.context->>'wakeup_id' IS NULL
+        AND first_task.trigger_comment_id IS NULL AND first_task.comment_thread_id IS NULL
+        AND first_task.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+      ORDER BY first_task.created_at, first_task.id LIMIT 1)
+  AND NOT EXISTS (SELECT 1 FROM agent_task_queue scoped
+      WHERE scoped.issue_id = i.id AND scoped.agent_id = @agent_id
+        AND scoped.comment_thread_id = @root_comment_id
+        AND scoped.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory'))
+  AND task.issue_id = i.id AND task.agent_id = @agent_id
+  AND task.trigger_comment_id IS NULL AND task.comment_thread_id IS NULL
+  AND task.context->>'wakeup_id' IS NULL
+  AND task.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory');
+
+-- name: GetActiveSlackAutopilotThreadTask :one
+SELECT task.* FROM agent_task_queue task
+JOIN issue i ON i.id = task.issue_id
+WHERE i.id = @issue_id AND i.workspace_id = @workspace_id
+  AND task.agent_id = @agent_id AND task.comment_thread_id = @root_comment_id
+  AND task.context->>'wakeup_id' IS NULL
+  AND task.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+ORDER BY task.created_at DESC, task.id DESC
+LIMIT 1;
+
+-- name: HasDeliveredSlackAutopilotReply :one
+SELECT EXISTS (SELECT 1 FROM agent_task_queue task
+    JOIN issue i ON i.id = task.issue_id
+    WHERE i.id = @issue_id AND i.workspace_id = @workspace_id
+      AND task.agent_id = @agent_id
+      AND (@comment_id::uuid = ANY(task.delivered_comment_ids)
+           OR EXISTS (SELECT 1 FROM task_supplement supplement
+               WHERE supplement.task_id = task.id
+                 AND supplement.workspace_id = i.workspace_id
+                 AND supplement.comment_id = @comment_id::uuid
+                 AND supplement.status = 'delivered'))) AS delivered;
+
 -- name: GetLatestTaskRoleForIssueAndAgent :one
 -- Returns the role markers from the agent's most recent task on this issue.
 -- Used by the squad-leader self-trigger guard to tell apart leader tasks,

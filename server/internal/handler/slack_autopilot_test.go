@@ -68,8 +68,11 @@ func newSlackAutopilotFixture(t *testing.T, media engine.MediaResolver) *slackAu
 	h.AutopilotService.PrepareIssueMedia = intake.PrepareIssueMedia
 	t.Cleanup(func() {
 		for _, query := range []string{
+			`DELETE FROM task_supplement WHERE issue_id IN (SELECT issue_id FROM autopilot_run WHERE autopilot_id=$1)`,
+			`DELETE FROM task_supplement_capability WHERE task_id IN (SELECT id FROM agent_task_queue WHERE issue_id IN (SELECT issue_id FROM autopilot_run WHERE autopilot_id=$1))`,
 			`DELETE FROM agent_task_queue WHERE issue_id IN (SELECT issue_id FROM autopilot_run WHERE autopilot_id=$1)`,
 			`DELETE FROM attachment WHERE issue_id IN (SELECT issue_id FROM autopilot_run WHERE autopilot_id=$1)`,
+			`DELETE FROM comment WHERE issue_id IN (SELECT issue_id FROM autopilot_run WHERE autopilot_id=$1)`,
 			`DELETE FROM issue WHERE id IN (SELECT issue_id FROM autopilot_run WHERE autopilot_id=$1)`,
 			`DELETE FROM autopilot_run WHERE autopilot_id=$1`,
 			`DELETE FROM webhook_delivery WHERE autopilot_id=$1`,

@@ -264,6 +264,7 @@ type Handler struct {
 	WebhookAbsoluteIPRateLimiter WebhookRateLimiter
 	InvitationRateLimiters       InvitationRateLimiters
 	WebhookDeliveryWorker        *WebhookDeliveryWorker
+	SlackAutopilot               *SlackAutopilotIntake
 	CloudRuntime                 cloudRuntimeProxy
 	// Test-only HTTP override; nil uses the default client in production.
 	googleOAuthHTTPClient *http.Client

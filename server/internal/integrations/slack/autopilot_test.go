@@ -118,6 +118,18 @@ func TestAutopilotInboundMessagePreservesMediaAndSource(t *testing.T) {
 	}
 }
 
+func TestAutopilotInboundMessagePreservesReplyThread(t *testing.T) {
+	report := AutopilotEvent{AppID: "A1", TeamID: "T1", ChannelID: "C123", UserID: "UALICE", MessageTS: "1700000000.000101", ThreadTS: "1700000000.000100", Text: "The failure also affects another browser."}
+	msg := AutopilotInboundMessage(report)
+	if msg.MessageID != report.MessageTS || msg.Source.ThreadID != report.ThreadTS || msg.ReplyTo == nil || msg.ReplyTo.MessageID != report.ThreadTS || msg.ReplyTo.RootID != report.ThreadTS {
+		t.Fatalf("reply lost its report thread: %+v", msg)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil || !strings.Contains(string(encoded), `"thread_ts":"1700000000.000100"`) {
+		t.Fatalf("reply thread missing from durable payload: %s err=%v", encoded, err)
+	}
+}
+
 func TestAutopilotEventFromMessageAndMentionMatch(t *testing.T) {
 	files := []slack.File{
 		{ID: "F1", Name: "bug.png", Mimetype: "image/png", Size: 123, URLPrivateDownload: "https://files.slack.com/files-pri/T1-F1/download/bug.png"},
@@ -144,6 +156,16 @@ func TestAutopilotEventFromMessageAndMentionMatch(t *testing.T) {
 	}
 }
 
+func TestAutopilotEventFromReplyMessageAndMentionMatch(t *testing.T) {
+	message := &slackevents.MessageEvent{Channel: "C123", User: "UALICE", TimeStamp: "1700000000.000101", ThreadTimeStamp: "1700000000.000100", Text: "<@UBOT> another detail"}
+	mention := &slackevents.AppMentionEvent{Channel: message.Channel, User: message.User, TimeStamp: message.TimeStamp, ThreadTimeStamp: message.ThreadTimeStamp, Text: message.Text}
+	gotMessage, messageOK := autopilotEventFrom(eventsAPI(message), "UBOT")
+	gotMention, mentionOK := autopilotEventFrom(eventsAPI(mention), "UBOT")
+	if !messageOK || !mentionOK || !reflect.DeepEqual(gotMessage, gotMention) || gotMessage.ThreadTS != message.ThreadTimeStamp || gotMessage.MessageTS != message.TimeStamp {
+		t.Fatalf("reply pairs lost stable message/thread IDs: message=%+v (%v) mention=%+v (%v)", gotMessage, messageOK, gotMention, mentionOK)
+	}
+}
+
 func TestAutopilotEventFromEligibleReports(t *testing.T) {
 	base := slackevents.MessageEvent{Channel: "C123", User: "UALICE", TimeStamp: "1700000000.000100", Text: "checkout fails"}
 	for _, tc := range []struct {
@@ -158,7 +180,17 @@ func TestAutopilotEventFromEligibleReports(t *testing.T) {
 			m.Text = ""
 			m.Message = &slack.Msg{Files: []slack.File{{ID: "F1", URLPrivate: "https://files.slack.com/file.png"}}}
 		}, true},
-		{"reply", func(m *slackevents.MessageEvent) { m.ThreadTimeStamp = "1699999999.000100" }, false},
+		{"reply", func(m *slackevents.MessageEvent) { m.ThreadTimeStamp = "1699999999.000100" }, true},
+		{"file-only reply", func(m *slackevents.MessageEvent) {
+			m.ThreadTimeStamp = "1699999999.000100"
+			m.SubType = "file_share"
+			m.Text = ""
+			m.Message = &slack.Msg{Files: []slack.File{{ID: "F1", URLPrivate: "https://files.slack.com/file.png"}}}
+		}, true},
+		{"reply broadcast", func(m *slackevents.MessageEvent) {
+			m.ThreadTimeStamp = "1699999999.000100"
+			m.SubType = "thread_broadcast"
+		}, true},
 		{"own bot", func(m *slackevents.MessageEvent) { m.User = "UBOT" }, false},
 		{"another bot", func(m *slackevents.MessageEvent) { m.BotID = "BOTHER" }, false},
 		{"bot subtype", func(m *slackevents.MessageEvent) { m.SubType = "bot_message" }, false},
@@ -167,6 +199,8 @@ func TestAutopilotEventFromEligibleReports(t *testing.T) {
 		{"broadcast", func(m *slackevents.MessageEvent) { m.SubType = "thread_broadcast" }, false},
 		{"missing user", func(m *slackevents.MessageEvent) { m.User = "" }, false},
 		{"missing timestamp", func(m *slackevents.MessageEvent) { m.TimeStamp = "" }, false},
+		{"invalid timestamp", func(m *slackevents.MessageEvent) { m.TimeStamp = "not-a-timestamp" }, false},
+		{"invalid reply timestamp", func(m *slackevents.MessageEvent) { m.ThreadTimeStamp = "not-a-timestamp" }, false},
 		{"missing channel", func(m *slackevents.MessageEvent) { m.Channel = "" }, false},
 		{"DM", func(m *slackevents.MessageEvent) { m.Channel = "D123" }, false},
 		{"empty", func(m *slackevents.MessageEvent) { m.Text = " \n " }, false},

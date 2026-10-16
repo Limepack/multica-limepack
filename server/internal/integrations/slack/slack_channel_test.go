@@ -60,6 +60,62 @@ func TestAutopilotFailureLeavesEnvelopeUnacknowledged(t *testing.T) {
 	}
 }
 
+func TestAutopilotThreadRepliesPersistBeforeACKAndSkipChat(t *testing.T) {
+	for _, inner := range []any{
+		&slackevents.MessageEvent{Channel: "C123", User: "UALICE", TimeStamp: "1700000000.000101", ThreadTimeStamp: "1700000000.000100", Text: "Another browser also fails."},
+		&slackevents.AppMentionEvent{Channel: "C123", User: "UALICE", TimeStamp: "1700000000.000101", ThreadTimeStamp: "1700000000.000100", Text: "<@UBOT> another detail"},
+		&slackevents.MessageEvent{Channel: "C123", User: "UALICE", TimeStamp: "1700000000.000101", ThreadTimeStamp: "1700000000.000100", Text: "Another detail", SubType: "thread_broadcast"},
+	} {
+		var calls []string
+		c := &slackChannel{
+			botUserID: "UBOT",
+			autopilot: autopilotTestHandler(func(_ context.Context, event AutopilotEvent) (bool, error) {
+				calls = append(calls, "persist")
+				if event.ThreadTS != "1700000000.000100" || event.MessageTS != "1700000000.000101" {
+					t.Fatalf("incorrect reply context: %+v", event)
+				}
+				return true, nil
+			}),
+			handler: func(context.Context, channel.InboundMessage) error {
+				t.Fatal("captured-channel reply reached chat")
+				return nil
+			},
+		}
+		if err := c.processEventsAPI(context.Background(), eventsAPI(inner), compileMentionRe("UBOT"), func() { calls = append(calls, "ack") }); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(calls, []string{"persist", "ack"}) {
+			t.Fatalf("reply calls=%v, want durable intake before ACK", calls)
+		}
+	}
+}
+
+func TestUnmatchedThreadRepliesPreserveACKFirstChat(t *testing.T) {
+	for _, inner := range []any{
+		&slackevents.MessageEvent{Channel: "COTHER", User: "UALICE", TimeStamp: "1700000000.000101", ThreadTimeStamp: "1700000000.000100", Text: "<@UBOT> follow up"},
+		&slackevents.AppMentionEvent{Channel: "COTHER", User: "UALICE", TimeStamp: "1700000000.000101", ThreadTimeStamp: "1700000000.000100", Text: "<@UBOT> follow up"},
+	} {
+		var calls []string
+		c := &slackChannel{
+			botUserID: "UBOT",
+			autopilot: autopilotTestHandler(func(context.Context, AutopilotEvent) (bool, error) { return false, nil }),
+			handler: func(_ context.Context, msg channel.InboundMessage) error {
+				calls = append(calls, "chat")
+				if !msg.AddressedToBot || msg.ReplyTo == nil || msg.ReplyTo.RootID != "1700000000.000100" {
+					t.Fatalf("ordinary mention reply lost addressing/thread: %+v", msg)
+				}
+				return nil
+			},
+		}
+		if err := c.processEventsAPI(context.Background(), eventsAPI(inner), compileMentionRe("UBOT"), func() { calls = append(calls, "ack") }); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(calls, []string{"ack", "chat"}) {
+			t.Fatalf("unmatched reply calls=%v, want ordinary ACK-first chat", calls)
+		}
+	}
+}
+
 func TestUnmatchedReportsAndDMsPreserveACKFirstChat(t *testing.T) {
 	for _, inner := range []any{
 		&slackevents.MessageEvent{Channel: "COTHER", User: "UALICE", TimeStamp: "1700000000.000100", Text: "<@UBOT> hello"},
@@ -87,12 +143,11 @@ func TestUnmatchedReportsAndDMsPreserveACKFirstChat(t *testing.T) {
 	}
 }
 
-func TestThreadAndSystemEventsNeverReachAutopilot(t *testing.T) {
+func TestSystemEventsNeverReachAutopilot(t *testing.T) {
 	for _, inner := range []any{
 		(*slackevents.MessageEvent)(nil),
 		(*slackevents.AppMentionEvent)(nil),
-		&slackevents.MessageEvent{Channel: "C123", User: "UALICE", TimeStamp: "1700000000.000100", ThreadTimeStamp: "1699999999.000100", Text: "<@UBOT> follow up"},
-		&slackevents.AppMentionEvent{Channel: "C123", User: "UALICE", TimeStamp: "1700000000.000100", ThreadTimeStamp: "1699999999.000100", Text: "<@UBOT> follow up"},
+		&slackevents.MessageEvent{Channel: "C123", User: "UALICE", TimeStamp: "1700000000.000100", Text: "broadcast without root", SubType: "thread_broadcast"},
 		&slackevents.MessageEvent{Channel: "C123", User: "UALICE", TimeStamp: "1700000000.000100", Text: "changed", SubType: "message_changed"},
 		&slackevents.MessageEvent{Channel: "C123", User: "UALICE", TimeStamp: "1700000000.000100", Text: "bot", BotID: "BOTHER"},
 	} {

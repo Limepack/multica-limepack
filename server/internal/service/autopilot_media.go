@@ -60,16 +60,39 @@ func (s *AutopilotService) FailIssueMediaPreparation(ctx context.Context, runID,
 // intents and attachment rows commit atomically, so recovery never dispatches
 // an issue before its screenshots are attached.
 func bindAutopilotIssueMedia(ctx context.Context, qtx *db.Queries, issue *db.Issue, prepared AutopilotIssueMedia) error {
+	markdown, err := bindAutopilotMedia(ctx, qtx, *issue, pgtype.UUID{}, prepared)
+	if err != nil || markdown == "" {
+		return err
+	}
+	updated, err := qtx.MaterializeIssueChannelMediaMarkdown(ctx, db.MaterializeIssueChannelMediaMarkdownParams{
+		ID: issue.ID, WorkspaceID: issue.WorkspaceID, Markdown: pgtype.Text{String: markdown, Valid: true},
+	})
+	if err == nil {
+		*issue = updated
+	}
+	return err
+}
+
+// BindAutopilotCommentMedia binds native Slack reply uploads in the comment's
+// lease-fenced transaction and returns the attachment markdown for its text.
+func BindAutopilotCommentMedia(ctx context.Context, qtx *db.Queries, issue db.Issue, commentID pgtype.UUID, prepared AutopilotIssueMedia) (string, error) {
+	if !commentID.Valid {
+		return "", errors.New("media comment is required")
+	}
+	return bindAutopilotMedia(ctx, qtx, issue, commentID, prepared)
+}
+
+func bindAutopilotMedia(ctx context.Context, qtx *db.Queries, issue db.Issue, commentID pgtype.UUID, prepared AutopilotIssueMedia) (string, error) {
 	if len(prepared.Refs) == 0 {
-		return nil
+		return "", nil
 	}
 	if !issue.ID.Valid || !issue.WorkspaceID.Valid || !prepared.UploaderID.Valid {
-		return errors.New("issue, workspace and media uploader are required")
+		return "", errors.New("issue, workspace and media uploader are required")
 	}
 	keys := make([]string, 0, len(prepared.Refs))
 	for _, ref := range prepared.Refs {
 		if ref.StorageKey == "" || ref.StorageURL == "" {
-			return errors.New("media storage key and URL are required")
+			return "", errors.New("media storage key and URL are required")
 		}
 		keys = append(keys, ref.StorageKey)
 	}
@@ -77,7 +100,7 @@ func bindAutopilotIssueMedia(ctx context.Context, qtx *db.Queries, issue *db.Iss
 		StorageKeys: keys, WorkspaceID: issue.WorkspaceID,
 	})
 	if err != nil {
-		return fmt.Errorf("claim media intents: %w", err)
+		return "", fmt.Errorf("claim media intents: %w", err)
 	}
 	claimed := make(map[string]bool, len(claimedKeys))
 	for _, key := range claimedKeys {
@@ -88,7 +111,7 @@ func bindAutopilotIssueMedia(ctx context.Context, qtx *db.Queries, issue *db.Iss
 		if !claimed[ref.StorageKey] {
 			// The reconciler owns or already removed the object. Roll back
 			// the new issue rather than hand the agent a missing screenshot.
-			return fmt.Errorf("media intent unavailable for %q", ref.StorageKey)
+			return "", fmt.Errorf("media intent unavailable for %q", ref.StorageKey)
 		}
 		delete(claimed, ref.StorageKey)
 		id := dbid.NewV7()
@@ -101,22 +124,15 @@ func bindAutopilotIssueMedia(ctx context.Context, qtx *db.Queries, issue *db.Iss
 			contentType = "application/octet-stream"
 		}
 		att, err := qtx.CreateAttachment(ctx, db.CreateAttachmentParams{
-			ID: id, WorkspaceID: issue.WorkspaceID, IssueID: issue.ID,
+			ID: id, WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, CommentID: commentID,
 			UploaderType: "member", UploaderID: prepared.UploaderID,
 			Filename: filename, Url: ref.StorageURL, ContentType: contentType,
 			SizeBytes: ref.SizeBytes,
 		})
 		if err != nil {
-			return fmt.Errorf("create attachment: %w", err)
+			return "", fmt.Errorf("create attachment: %w", err)
 		}
 		blocks = append(blocks, channelmedia.Block(util.UUIDToString(att.ID), filename, ref.Type == channel.MsgTypeImage))
 	}
-	updated, err := qtx.MaterializeIssueChannelMediaMarkdown(ctx, db.MaterializeIssueChannelMediaMarkdownParams{
-		ID: issue.ID, WorkspaceID: issue.WorkspaceID, Markdown: pgtype.Text{String: strings.Join(blocks, "\n\n"), Valid: true},
-	})
-	if err != nil {
-		return fmt.Errorf("append attachment markdown: %w", err)
-	}
-	*issue = updated
-	return nil
+	return strings.Join(blocks, "\n\n"), nil
 }
