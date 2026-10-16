@@ -183,9 +183,9 @@ jobs:
           file: Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/mads-bit/multica-limepack-backend:slack-bug-${{ github.sha }}
+          tags: ghcr.io/limepack/multica-limepack-backend:slack-bug-${{ github.sha }}
           labels: |
-            org.opencontainers.image.source=https://github.com/mads-bit/multica-limepack
+            org.opencontainers.image.source=https://github.com/Limepack/multica-limepack
             org.opencontainers.image.revision=${{ github.sha }}
           build-args: |
             VERSION=0.6.1-limepack-slack
@@ -197,4 +197,4 @@ jobs:
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          printf 'Backend image: `ghcr.io/mads-bit/multica-limepack-backend@%s`\n' "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Backend image: `ghcr.io/limepack/multica-limepack-backend@%s`\n' "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
