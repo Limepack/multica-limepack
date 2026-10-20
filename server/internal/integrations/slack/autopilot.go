@@ -22,18 +22,20 @@ import (
 // workspace and agent IDs identify the installation allowed to submit reports.
 // Instructions remain on the Autopilot's editable Runbook.
 type AutopilotRoute struct {
-	WorkspaceID string `json:"workspace_id"`
-	AgentID     string `json:"agent_id"`
-	TeamID      string `json:"team_id"`
-	ChannelID   string `json:"channel_id"`
-	AutopilotID string `json:"autopilot_id"`
-	TriggerID   string `json:"trigger_id"`
+	WorkspaceID         string `json:"workspace_id"`
+	AgentID             string `json:"agent_id"`
+	TeamID              string `json:"team_id"`
+	ChannelID           string `json:"channel_id"`
+	AutopilotID         string `json:"autopilot_id"`
+	TriggerID           string `json:"trigger_id"`
+	CompletionStatusKey string `json:"completion_status_key,omitempty"`
 }
 
 var (
 	autopilotTeamID    = regexp.MustCompile(`^T[A-Z0-9]+$`)
 	autopilotChannelID = regexp.MustCompile(`^[CG][A-Z0-9]+$`)
 	autopilotTimestamp = regexp.MustCompile(`^[0-9]+\.[0-9]{6}$`)
+	autopilotStatusKey = regexp.MustCompile(`^[a-z0-9][a-z0-9_]{0,31}$`)
 )
 
 // ParseAutopilotRoutes validates MULTICA_SLACK_AUTOPILOT_ROUTES before startup.
@@ -77,6 +79,9 @@ func ParseAutopilotRoutes(raw string) ([]AutopilotRoute, error) {
 		}
 		if !autopilotTeamID.MatchString(route.TeamID) || !autopilotChannelID.MatchString(route.ChannelID) {
 			return nil, fmt.Errorf("slack: autopilot route %d has invalid team_id or channel_id", i)
+		}
+		if route.CompletionStatusKey != "" && !autopilotStatusKey.MatchString(route.CompletionStatusKey) {
+			return nil, fmt.Errorf("slack: autopilot route %d has invalid completion_status_key", i)
 		}
 		key := route.WorkspaceID + ":" + route.AgentID + ":" + route.TeamID + ":" + route.ChannelID
 		if seen[key] {

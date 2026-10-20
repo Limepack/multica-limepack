@@ -97,8 +97,25 @@ func TestSlackAutopilotReplyMergesQueuedAssignmentWithoutAnotherRun(t *testing.T
 		t.Fatalf("original Slack root missing or mis-scoped: root=%+v err=%v", root, err)
 	}
 	comment, err := f.h.Queries.GetCommentInWorkspace(context.Background(), db.GetCommentInWorkspaceParams{ID: reply.ID, WorkspaceID: parseUUID(testWorkspaceID)})
-	if err != nil || comment.IssueID != run.IssueID || comment.ParentID != parent.ID || comment.AuthorID != parseUUID(testUserID) || !strings.Contains(comment.Content, replyEvent.Text) || !strings.Contains(comment.Content, "Runbook") || !strings.Contains(comment.Content, "Reproduce and fix the report.") || !strings.Contains(comment.Content, "/p1700000000000101") {
-		t.Fatalf("reply lost content, instructions, principal or source link: comment=%+v err=%v", comment, err)
+	if err != nil || comment.IssueID != run.IssueID || comment.ParentID != parent.ID || comment.AuthorID != parseUUID(testUserID) || !strings.Contains(comment.Content, replyEvent.Text) || !strings.Contains(comment.Content, "Continue this issue from its current state.") || strings.Contains(comment.Content, "Reproduce and fix the report.") || !strings.Contains(comment.Content, "/p1700000000000101") {
+		t.Fatalf("reply lost its delta, continuation instructions, principal or source link, or repeated the initial Runbook: comment=%+v err=%v", comment, err)
+	}
+}
+
+func TestSlackAutopilotFollowupContentUsesRevisionWithoutRepeatingRunbook(t *testing.T) {
+	event := slack.AutopilotEvent{UserID: "UREPORTER", Text: "It still fails in Firefox."}
+	content := slackAutopilotFollowupContent(event, "autopilot-id", "revision-id")
+	for _, want := range []string{event.Text, "<@UREPORTER>", "Continue this issue", "same issue and Slack thread", "approval rules", "revision revision-id", "fetch the current Runbook once"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("follow-up is missing %q", want)
+		}
+	}
+	if len(content) > len(event.Text)+800 || strings.Contains(content, "Autopilot instructions (read the current Runbook before acting)") {
+		t.Fatal("follow-up repeated the full intake prompt")
+	}
+	withoutRevision := slackAutopilotFollowupContent(event, "autopilot-id", "")
+	if strings.Contains(withoutRevision, "revision ") || !strings.Contains(withoutRevision, "Runbook: autopilot-id") {
+		t.Fatal("missing legacy revision should retain the Runbook reference")
 	}
 }
 

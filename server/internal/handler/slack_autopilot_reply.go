@@ -23,6 +23,16 @@ func isSlackAutopilotReply(event slack.AutopilotEvent) bool {
 	return event.ThreadTS != "" && event.ThreadTS != event.MessageTS
 }
 
+func slackAutopilotFollowupContent(event slack.AutopilotEvent, autopilotID, revisionID string) string {
+	content := "Slack thread reply from <@" + event.UserID + ">:\n\n" + event.Text
+	content += "\n\nContinue this issue from its current state. Address only what this reply and its new attachments change; repeat research or reproduction only when new evidence requires it. Handle thanks or confirmation briefly. Keep the same issue and Slack thread, preserve approval rules, and avoid duplicate Slack answers."
+	content += "\n\nRunbook: " + autopilotID
+	if revisionID != "" {
+		content += " (revision " + revisionID + "). Reuse this revision if already read; fetch the current Runbook once if it changed or your instructions are unavailable."
+	}
+	return content
+}
+
 func recentSlackAutopilotThread(ts string, now time.Time) bool {
 	seconds, err := strconv.ParseInt(strings.SplitN(ts, ".", 2)[0], 10, 64)
 	return err == nil && now.Sub(time.Unix(seconds, 0)) <= 10*time.Minute && now.Sub(time.Unix(seconds, 0)) >= -time.Minute
@@ -198,7 +208,12 @@ func (s *SlackAutopilotIntake) commitReply(ctx context.Context, delivery, parent
 		!local.canInvokeAgent(ctx, agent, "member", uuidToString(principal), uuidToString(principal), uuidToString(issue.WorkspaceID)) {
 		return false, db.AgentTaskQueue{}, errors.New("Slack thread authorization changed")
 	}
-	instructions := ap.Description.String
+	revisionID := ""
+	if revision, revisionErr := qtx.GetActiveAutopilotRuleVersion(ctx, db.GetActiveAutopilotRuleVersionParams{WorkspaceID: ap.WorkspaceID, AutopilotID: ap.ID}); revisionErr == nil {
+		revisionID = uuidToString(revision.ID)
+	} else if !errors.Is(revisionErr, pgx.ErrNoRows) {
+		return false, db.AgentTaskQueue{}, fmt.Errorf("resolve Slack follow-up Runbook revision: %w", revisionErr)
+	}
 	// CreateComment locks the issue before child/task rows, matching teardown.
 	createdComment := false
 	var issueRevision int64
@@ -219,10 +234,7 @@ func (s *SlackAutopilotIntake) commitReply(ctx context.Context, delivery, parent
 	}
 	comment, err := qtx.GetCommentInWorkspace(ctx, db.GetCommentInWorkspaceParams{ID: delivery.ID, WorkspaceID: issue.WorkspaceID})
 	if errors.Is(err, pgx.ErrNoRows) {
-		content := "Slack thread reply from <@" + event.UserID + ">:\n\n" + event.Text
-		if instructions != "" {
-			content += "\n\nAutopilot instructions (read the current Runbook before acting):\n\n" + instructions
-		}
+		content := slackAutopilotFollowupContent(event, uuidToString(ap.ID), revisionID)
 		if prepared.DescriptionAppendix != "" {
 			content += "\n\n" + prepared.DescriptionAppendix
 		}

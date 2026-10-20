@@ -6075,32 +6075,25 @@ func (s *TaskService) HandleFailedTasks(ctx context.Context, tasks []db.AgentTas
 				effectiveStatus := issuestatus.Effective(ctx, s.Queries, issue.WorkspaceID, issue.Status)
 				if effectiveStatus == "in_progress" && !processedIssues[issueKey] && !retriedIssues[issueKey] {
 					processedIssues[issueKey] = true
-					hasActive, checkErr := s.Queries.HasActiveTaskForIssue(ctx, t.IssueID)
-					if checkErr != nil {
-						slog.Warn("handle failed tasks: active check failed",
-							"issue_id", issueKey,
-							"error", checkErr,
-						)
-					} else if !hasActive {
-						updatedIssue, updateErr := s.Queries.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{
-							SourceTaskID: t.ID,
-							ID:           t.IssueID,
-							Status:       "todo",
-							WorkspaceID:  issue.WorkspaceID,
-						})
-						if updateErr != nil {
+					updatedIssue, updateErr := s.Queries.ResetStuckIssueAfterFailedTask(ctx, db.ResetStuckIssueAfterFailedTaskParams{
+						SourceTaskID: t.ID,
+						ID:           t.IssueID,
+						WorkspaceID:  issue.WorkspaceID,
+					})
+					if updateErr != nil {
+						if !errors.Is(updateErr, pgx.ErrNoRows) {
 							slog.Warn("handle failed tasks: reset stuck issue failed",
 								"issue_id", issueKey,
 								"error", updateErr,
 							)
-						} else {
-							// This direct reset bypasses the HTTP UpdateIssue
-							// handler that normally emits issue:updated, so emit
-							// it here too. Without it the board / status-filter
-							// caches keep showing the issue as in_progress until
-							// the next write touches it (#4648 / MUL-3782).
-							s.broadcastIssueUpdated(ctx, updatedIssue, issue.Status)
 						}
+					} else {
+						// This direct reset bypasses the HTTP UpdateIssue
+						// handler that normally emits issue:updated, so emit
+						// it here too. Without it the board / status-filter
+						// caches keep showing the issue as in_progress until
+						// the next write touches it (#4648 / MUL-3782).
+						s.broadcastIssueUpdated(ctx, updatedIssue, issue.Status)
 					}
 				}
 			}

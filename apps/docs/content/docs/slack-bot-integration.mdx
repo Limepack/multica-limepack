@@ -196,7 +196,11 @@ Human replies in a tracked report thread are durably added to the same issue,
 including their Slack links and available files. They do not create another
 bug issue. New context reaches the assigned agent through Multica's existing
 comment and task mechanisms, including follow-ups after the first run ends.
-The agent is instructed to read the current Runbook before acting on a reply.
+Replies carry only the new message, new attachments, and short continuation
+instructions. The full intake Runbook is not copied into every reply. Its
+published revision is included so the agent can reuse known instructions and
+refresh them once when they change. Existing session continuation is reused;
+if the session cannot resume, the agent reconstructs context from the issue.
 Tracking begins with automatically imported reports; existing Slack threads
 are not backfilled. Bots, edits, and Slack system events do not start reports.
 Messages routed to an Autopilot do not also start a Chat. DMs and mentions
@@ -217,6 +221,31 @@ Pause the Autopilot or disable its webhook trigger in Multica to stop intake
 dispatch. Its Runbook remains editable without redeploying. Removing the route
 or revoking the Slack installation also stops its queued report execution.
 An empty route array disables automatic intake.
+
+### Complete a tracked report with a checkmark
+
+To opt a route into human-confirmed completion, add `completion_status_key`
+with an existing completed-category status key, for example `"ai_done"`.
+Create **AI Done** under **Settings → Issue Statuses → Done** first. The
+display name is not the API key; the edit dialog shows the immutable key.
+Leave this route field absent to keep reaction-based completion disabled.
+
+Add the `reactions:read` Bot scope and `reaction_added` Bot event to the
+existing Slack app, then reinstall it to apply the new scope. Keep its other
+scopes, subscriptions and credentials. This needs no additional Slack app or
+Autopilot.
+
+A human adding `:white_check_mark:`, `:heavy_check_mark:` or `:checkmark:` to
+the original report or a message in its tracked thread moves the linked issue
+to the configured completed status. Bot and app actors, other channels and
+untracked threads cannot close issues. Completion waits for existing work on
+that issue to finish, records one audit comment, and does not start an agent
+run. Removing a reaction does not reopen the issue. Cancelled issues are left
+unchanged.
+
+For smaller AI tickets, set the agent's editable instructions to use this
+status as its default closing destination. Work still awaiting verification,
+code review or approval should retain its existing review workflow.
 
 ### Slack token encryption
 
