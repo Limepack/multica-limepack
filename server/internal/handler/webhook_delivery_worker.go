@@ -119,6 +119,12 @@ func (w *WebhookDeliveryWorker) ProcessNext(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("claim queued delivery: %w", err)
 	}
 	// Waiting replies admit no new run and must not exhaust the trigger budget.
+	if delivery.Event == slackAutopilotReactionEvent {
+		if w.h.SlackAutopilot == nil {
+			return true, w.complete(ctx, delivery, deliveryStatusIgnored, pgtype.UUID{}, "Slack completion route unavailable")
+		}
+		return true, w.h.SlackAutopilot.processReaction(ctx, delivery)
+	}
 	if delivery.Event == slackAutopilotReplyEvent {
 		if w.h.SlackAutopilot == nil {
 			return true, w.complete(ctx, delivery, deliveryStatusIgnored, pgtype.UUID{}, "Slack thread route unavailable")

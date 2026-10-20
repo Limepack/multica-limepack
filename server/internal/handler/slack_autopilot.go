@@ -42,16 +42,20 @@ type slackAutopilotEnvelope struct {
 // tuples. It uses the existing durable webhook queue and trigger principal;
 // reporters do not need to bind their Slack accounts to Multica.
 type SlackAutopilotIntake struct {
-	h         *Handler
-	routes    []slack.AutopilotRoute
-	media     engine.MediaResolver
-	permalink func(context.Context, db.ChannelInstallation, slack.AutopilotEvent) (string, error)
+	h              *Handler
+	routes         []slack.AutopilotRoute
+	media          engine.MediaResolver
+	permalink      func(context.Context, db.ChannelInstallation, slack.AutopilotEvent) (string, error)
+	reactionTarget func(context.Context, db.ChannelInstallation, slack.AutopilotReactionEvent) (slack.AutopilotReactionTarget, error)
 }
 
 func NewSlackAutopilotIntake(h *Handler, routes []slack.AutopilotRoute, media engine.MediaResolver, decrypt slack.Decrypter) *SlackAutopilotIntake {
 	intake := &SlackAutopilotIntake{h: h, routes: append([]slack.AutopilotRoute(nil), routes...), media: media,
 		permalink: func(ctx context.Context, installation db.ChannelInstallation, event slack.AutopilotEvent) (string, error) {
 			return slack.AutopilotPermalink(ctx, installation, decrypt, event)
+		},
+		reactionTarget: func(ctx context.Context, installation db.ChannelInstallation, event slack.AutopilotReactionEvent) (slack.AutopilotReactionTarget, error) {
+			return slack.ResolveAutopilotReaction(ctx, installation, decrypt, event)
 		},
 	}
 	if len(routes) > 0 {

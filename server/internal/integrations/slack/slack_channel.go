@@ -178,6 +178,18 @@ func (c *slackChannel) handleSocketEvent(ctx context.Context, sm *socketmode.Cli
 // Other events retain the ordinary ACK-first chat path. The Autopilot handler
 // must keep network/media work off this path and return after durable intake.
 func (c *slackChannel) processEventsAPI(ctx context.Context, e slackevents.EventsAPIEvent, mentionRe *regexp.Regexp, ack func()) error {
+	if reactions, ok := c.autopilot.(AutopilotReactionHandler); ok {
+		if reaction, valid := autopilotReactionFrom(e, c.botUserID); valid {
+			handled, err := reactions.HandleAutopilotReaction(ctx, reaction)
+			if err != nil {
+				return err
+			}
+			if handled {
+				ack()
+				return nil
+			}
+		}
+	}
 	if c.autopilot != nil {
 		if report, ok := autopilotEventFrom(e, c.botUserID); ok {
 			handled, err := c.autopilot.HandleAutopilotEvent(ctx, report)
